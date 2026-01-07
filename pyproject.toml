@@ -1,0 +1,16 @@
+[project]
+name = "wplstatbot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "google-generativeai>=0.8.6",
+    "langchain>=1.2.0",
+    "langchain-classic>=1.0.1",
+    "langchain-community[sql-database]>=0.0.208",
+    "langchain-google-genai>=4.1.2",
+    "python-dotenv>=1.2.1",
+    "sqlalchemy>=2.0.45",
+    "streamlit>=1.52.2",
+]
