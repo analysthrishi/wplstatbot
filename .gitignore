@@ -54,8 +54,11 @@ Thumbs.db
 # Streamlit
 .streamlit/
 
-# Database (optional - comment out if you want to share sample data)
-wpl.db
+# Database: wpl.db is committed on purpose so the deployed app has data.
+# Ignore SQLite temp files only.
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Logs
 *.log
