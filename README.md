@@ -25,7 +25,7 @@ Transform natural language questions into instant WPL cricket statistics! Ask "H
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/hrishiman/wplstatbot.git
+   git clone https://github.com/analysthrishi/wplstatbot.git
    cd wplstatbot
    ```
 
@@ -205,7 +205,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/hrishiman/wplstatbot/issues)
+- **Issues**: [GitHub Issues](https://github.com/analysthrishi/wplstatbot/issues)
 
 ---
 
