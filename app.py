@@ -90,7 +90,7 @@ with st.expander("📋 Player Naming Convention & Examples", expanded=False):
 
     st.markdown("""
     **Tips:**
-    - Use exact database names for best results
+    - Full names work too: "Harmanpreet Kaur batting stats" is read as "H Kaur batting stats"
     - For batting stats: "Player Name batting stats"
     - For bowling stats: "Player Name bowling stats"
     - For team queries: Use full team names (e.g., "Delhi Capitals", "Mumbai Indians")

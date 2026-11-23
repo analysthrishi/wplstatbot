@@ -1,6 +1,9 @@
 """Shared text-to-SQL chain for WPL StatsBot (used by app.py and test.py)."""
+import csv
 import re
 import sqlite3
+from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 from langchain_community.utilities import SQLDatabase
@@ -14,11 +17,108 @@ from langchain_core.runnables import RunnablePassthrough
 DB_PATH = Path(__file__).resolve().parent / "wpl.db"
 # Read-only URI: any write (DROP/DELETE/UPDATE...) the LLM might generate fails at the SQLite level.
 DB_URI = f"file:{DB_PATH.as_posix()}?mode=ro"
+ALIASES_PATH = Path(__file__).resolve().parent / "player_aliases.csv"
 MODEL = "gemini-2.5-flash-lite"
 
 
 def connect_readonly():
     return sqlite3.connect(DB_URI, uri=True)
+
+
+# Words that commonly sit right before a surname in a question ("who dismissed Dottin").
+# The surname fallback never treats these as a first name.
+_NOT_FIRST_NAMES = {
+    "a", "an", "the", "by", "of", "for", "vs", "versus", "against", "and", "or", "to", "in", "on",
+    "at", "with", "who", "whom", "whose", "did", "does", "do", "has", "have", "had", "is", "was",
+    "are", "were", "dismissed", "dismiss", "dismisses", "dismissing", "out", "got", "get", "gets",
+    "bowled", "bowl", "bowls", "bowling", "bat", "bats", "batting", "batted", "stats",
+    "statistics", "runs", "wickets", "top", "most", "best", "how", "many", "much", "what",
+    "which", "scored", "score", "scores", "take", "taken", "took", "faced", "face", "between",
+    "player", "players", "team", "compare", "record", "records", "career", "economy", "average",
+    "strike", "rate", "innings", "matches", "season", "show", "give", "list", "me", "from",
+    "her", "she", "all", "total", "about", "tell", "than", "more", "less", "dismissals",
+}
+_WORD = re.compile(r"[A-Za-z][A-Za-z'-]*")
+
+
+@lru_cache(maxsize=1)
+def _name_index():
+    """Build (alias pattern, alias -> db name, surname -> [db names of players who played])."""
+    conn = connect_readonly()
+    try:
+        all_names = [r[0] for r in conn.execute("SELECT player_name FROM players")]
+        playing = [r[0] for r in conn.execute(
+            "SELECT DISTINCT p.player_name FROM players p "
+            "JOIN match_players mp ON mp.player_id = p.player_id"
+        )]
+    finally:
+        conn.close()
+
+    lookup = {name.lower(): name for name in all_names}
+    with open(ALIASES_PATH, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            lookup[row["alias"].strip().lower()] = row["player_name"].strip()
+
+    # Longest first so "Shafali Verma" wins over "S Verma", "Ellyse Perry" over "Perry".
+    alternatives = "|".join(re.escape(k) for k in sorted(lookup, key=len, reverse=True))
+    pattern = re.compile(rf"(?<![\w'-])(?:{alternatives})(?![\w'-])", re.I)
+
+    by_surname = defaultdict(list)
+    for name in playing:
+        parts = name.split()
+        if len(parts) >= 2:
+            by_surname[parts[-1].lower()].append(name)
+    return pattern, lookup, by_surname
+
+
+def resolve_player_names(question):
+    """Rewrite player names in a question to their exact database names.
+
+    "harmanpreet kaur batting stats" -> "H Kaur batting stats". Names are matched against
+    player_aliases.csv and the database names; anything else falls back to a surname match,
+    using the preceding word's initial to pick between players sharing a surname.
+    Ambiguous names are left unchanged.
+    """
+    pattern, lookup, by_surname = _name_index()
+
+    # Pass 1: known names/aliases -> placeholders, so pass 2 can't touch them.
+    resolved = []
+
+    def to_placeholder(match):
+        resolved.append(lookup[match.group(0).lower()])
+        return f"\x00{len(resolved) - 1}\x00"
+
+    text = pattern.sub(to_placeholder, question)
+
+    # Pass 2: surname fallback for names not in the alias file.
+    words = list(_WORD.finditer(text))
+    replacements = []  # (start, end, db_name)
+    consumed = set()
+    for i, word in enumerate(words):
+        candidates = by_surname.get(word.group(0).lower())
+        if not candidates or i in consumed:
+            continue
+        prev = words[i - 1] if i > 0 and (i - 1) not in consumed else None
+        if prev is not None and (
+            text[prev.end():word.start()].strip()  # not directly adjacent
+            or prev.group(0).lower() in _NOT_FIRST_NAMES
+        ):
+            prev = None
+        if prev is not None:
+            initial = prev.group(0)[0].lower()
+            matches = [c for c in candidates if c[0].lower() == initial]
+            if len(matches) == 1:
+                replacements.append((prev.start(), word.end(), matches[0]))
+                consumed.update({i - 1, i})
+                continue
+        if len(candidates) == 1:
+            replacements.append((word.start(), word.end(), candidates[0]))
+            consumed.add(i)
+
+    for start, end, name in reversed(replacements):
+        text = text[:start] + name + text[end:]
+
+    return re.sub(r"\x00(\d+)\x00", lambda m: resolved[int(m.group(1))], text)
 
 
 # Custom prompt for SQL generation with cricket-specific rules
@@ -31,6 +131,7 @@ ONLY use the following tables and schema:
 {table_info}
 
 CRITICAL CRICKET RULES:
+- Player names in the question are already exact database names (e.g. 'H Kaur', 'NR Sciver-Brunt'). Match them with p.player_name = '<name>' exactly as written; do not expand or change them.
 - "Against" a team means runs/wickets scored TAKEN by players FROM OTHER TEAMS in matches involving that team.
   For example, "runs against Delhi Capitals" means runs scored by non-DC players in matches where DC played.
   Filter: JOIN balls b ON matches m ON b.match_id = m.match_id WHERE (m.team1 = 'Delhi Capitals' OR m.team2 = 'Delhi Capitals') AND b.batting_team != 'Delhi Capitals'
@@ -110,9 +211,9 @@ def build_chain(api_key):
     write_query = create_sql_query_chain(llm, db, prompt=sql_generation_prompt)
 
     chain = (
-        RunnablePassthrough.assign(
-            query=lambda x: clean_sql(write_query.invoke({"question": x["question"]}))
-        ).assign(result=lambda x: execute_query.invoke(x["query"]))
+        RunnablePassthrough.assign(question=lambda x: resolve_player_names(x["question"]))
+        .assign(query=lambda x: clean_sql(write_query.invoke({"question": x["question"]})))
+        .assign(result=lambda x: execute_query.invoke(x["query"]))
         | answer_prompt
         | llm
         | StrOutputParser()
